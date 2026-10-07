@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { Clock, ChevronLeft, ChevronRight, Flag, Code2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { testApi } from '@/lib/api'
+import { getMockTestData } from '@/lib/mockQuestions'
 import Navbar from '@/components/layout/Navbar'
 
 interface Question {
@@ -24,6 +25,7 @@ function TestPageInner() {
 
   const [questions, setQuestions] = useState<Question[]>([])
   const [sessionId, setSessionId] = useState<number | null>(null)
+  const [usingMockData, setUsingMockData] = useState(false)
   const [current, setCurrent] = useState(0)
   const [answers, setAnswers] = useState<Record<number, any>>({})
   const [codeAnswers, setCodeAnswers] = useState<Record<number, string>>({})
@@ -49,14 +51,31 @@ function TestPageInner() {
     return () => clearInterval(timerRef.current)
   }, [sessionId])
 
+  const loadMockTest = (reason?: string) => {
+    const mock = getMockTestData(domain, technology)
+    setSessionId(mock.session_id)
+    setQuestions(mock.questions)
+    setTimeLeft(mock.duration_minutes * 60)
+    setUsingMockData(true)
+    if (reason) toast(reason, { icon: '⚠️' })
+  }
+
   const startTest = async () => {
+    // If technical assessment, always have a per-domain fallback ready
     try {
       const data = await testApi.startTest({ session_type: sessionType, domain, technology })
-      setSessionId(data.session_id)
-      setQuestions(data.questions)
-      setTimeLeft((data.duration_minutes || 30) * 60)
+      if (!data || !data.questions || data.questions.length === 0) {
+        // Backend responded but had no questions for this domain -> use dummy set
+        loadMockTest('Using sample questions for this domain')
+      } else {
+        setSessionId(data.session_id)
+        setQuestions(data.questions)
+        setTimeLeft((data.duration_minutes || 30) * 60)
+      }
     } catch (err: any) {
-      toast.error(err.message || 'Failed to load test')
+      // API failed / backend down / domain not seeded -> never show a hard error,
+      // silently fall back to dummy questions for the selected domain
+      loadMockTest(sessionType === 'technical' ? 'Using sample questions for this domain' : undefined)
     } finally {
       setLoading(false)
     }
@@ -75,13 +94,23 @@ function TestPageInner() {
     if (!sessionId) return
     setSubmitting(true)
     clearInterval(timerRef.current)
-    try {
-      const answerList = questions.map(q => ({
-        question_id: q.id,
-        user_answer: q.question_type === 'coding' ? codeAnswers[q.id] : answers[q.id],
-        time_spent_seconds: 0,
-      })).filter(a => a.user_answer !== undefined)
 
+    const answerList = questions.map(q => ({
+      question_id: q.id,
+      user_answer: q.question_type === 'coding' ? codeAnswers[q.id] : answers[q.id],
+      time_spent_seconds: 0,
+    })).filter(a => a.user_answer !== undefined)
+
+    // If we're on mock/dummy data, there's no real backend session to submit to —
+    // just compute a simple local result and route to a mock results view.
+    if (usingMockData) {
+      const answeredCount = answerList.length
+      toast.success('Test submitted!')
+      router.push(`/results/mock?domain=${encodeURIComponent(domain)}&answered=${answeredCount}&total=${questions.length}`)
+      return
+    }
+
+    try {
       const result = await testApi.submitTest({
         test_session_id: sessionId,
         answers: answerList,
@@ -90,7 +119,11 @@ function TestPageInner() {
       toast.success('Test submitted!')
       router.push(`/results/${result.result_id}`)
     } catch (err: any) {
-      toast.error(err.message || 'Submit failed')
+      // Even if submit fails, don't dead-end the user
+      toast.error(err.message || 'Submit failed — showing local summary instead')
+      const answeredCount = answerList.length
+      router.push(`/results/mock?domain=${encodeURIComponent(domain)}&answered=${answeredCount}&total=${questions.length}`)
+    } finally {
       setSubmitting(false)
     }
   }
